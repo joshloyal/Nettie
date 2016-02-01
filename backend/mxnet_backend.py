@@ -5,6 +5,9 @@ import logging
 import numpy as np
 
 from sklearn.metrics import log_loss
+from sklearn.utils import check_consistent_length, check_array
+from sklearn.cross_validation import train_test_split
+from sklearn.preprocessing import LabelBinarizer
 
 import mxnet as mx
 from mxnet.metric import EvalMetric
@@ -12,25 +15,56 @@ from mxnet.metric import EvalMetric
 __all__ = ['Activation', 'Dense', 'SoftmaxOutput', 'Variable',
            'BatchNormalization', 'Dropout', 'Sequential', 'Adam']
 
-def logloss(y_true, y_pred):
-    try:
-        return log_loss(y_true, y_pred)
-    except ValueError:
-        return 1
+def _weighted_sum(sample_score, sample_weight, normalize=False):
+    if normalize:
+        return np.average(sample_score, weights=sample_weight)
+    elif sample_weight is not None:
+        return np.dot(sample_score, sample_weight)
+    else:
+        return sample_score.sum()
 
-class LogLoss(mx.metric.EvalMetric):
+class LogLoss(object):
     def __init__(self):
-        super(LogLoss, self).__init__('log_loss')
+        self.lb_ = None
 
-    def update(self, labels, preds):
-        for i in range(len(labels)):
-            pred = preds[i].asnumpy()
-            label = labels[i].asnumpy().astype('int32')
+    @property
+    def __name__(self):
+        return 'log_loss'
 
-            self.sum_metric += log_loss(label, pred)
-            self.num_inst += pred_label.shape[0]
+    def __call__(self, y_true, y_pred, eps=1e-15, normalize=True, sample_weight=None):
+        if self.lb_ is None:
+            self.lb_ = LabelBinarizer()
+            T = self.lb_.fit_transform(y_true)
+        else:
+            T = self.lb_.transform(y_true)
 
-LOSS_MAP = {'categorical_crossentropy': mx.metric.np(logloss)}
+        if T.shape[1] == 1:
+            T = np.append(1 - T, T, axis=1)
+
+        Y = np.clip(y_pred, eps, 1 - eps)
+
+        if not isinstance(Y, np.ndarray):
+            raise ValueError('y_pred should be an array of floats.')
+
+        if Y.ndim == 1:
+            Y = Y[:, np.newaxis]
+        if Y.shape[1] == 1:
+            Y = np.append(1 - Y, Y, axis=1)
+
+        check_consistent_length(T, Y)
+        T = check_array(T)
+        Y = check_array(Y)
+        if T.shape[1] != Y.shape[1]:
+            raise ValueError('y_true and y_pred have different number of classes '
+                             '%d, %d' % (T.shape[1], Y.shape[1]))
+
+        Y /= Y.sum(axis=1)[:, np.newaxis]
+        loss = -(T * np.log(Y)).sum(axis=1)
+
+        return _weighted_sum(loss, sample_weight, normalize)
+
+
+LOSS_MAP = {'categorical_crossentropy': mx.metric.np(LogLoss())}
 
 class MXNetSymbol(object):
     def __init__(self, *args, **kwargs):
@@ -191,7 +225,13 @@ class Sequential(object):
                                           numpy_batch_size=batch_size,
                                           learning_rate=learning_rate)
 
-        self.model.fit(X, y, eval_metric=self.loss)
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=validation_split)
+
+        self.model.fit(X_train,
+                       y_train,
+                       eval_metric=self.loss,
+                       eval_data=[X_test, y_test])
 
     def predict(self, X):
         return self.model.predict(X)
