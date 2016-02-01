@@ -2,10 +2,35 @@ import six
 import numbers
 import logging
 
+import numpy as np
+
+from sklearn.metrics import log_loss
+
 import mxnet as mx
+from mxnet.metric import EvalMetric
 
 __all__ = ['Activation', 'Dense', 'SoftmaxOutput', 'Variable',
            'BatchNormalization', 'Dropout', 'Sequential', 'Adam']
+
+def logloss(y_true, y_pred):
+    try:
+        return log_loss(y_true, y_pred)
+    except ValueError:
+        return 1
+
+class LogLoss(mx.metric.EvalMetric):
+    def __init__(self):
+        super(LogLoss, self).__init__('log_loss')
+
+    def update(self, labels, preds):
+        for i in range(len(labels)):
+            pred = preds[i].asnumpy()
+            label = labels[i].asnumpy().astype('int32')
+
+            self.sum_metric += log_loss(label, pred)
+            self.num_inst += pred_label.shape[0]
+
+LOSS_MAP = {'categorical_crossentropy': mx.metric.np(logloss)}
 
 class MXNetSymbol(object):
     def __init__(self, *args, **kwargs):
@@ -51,6 +76,27 @@ class Activation(MXNetSymbol):
                 prev_symbol, *self.args, act_type=activation, **self.kwargs)
 
         return self.symbol(*self.args, act_type=activation, **self.kwargs)
+
+class LeakyReLU(MXNetSymbol):
+    @property
+    def symbol(self):
+        return mx.symbol.LeakyReLU
+
+    @property
+    def act_type(self):
+        pass
+
+    def __call__(self, prev_symbol=None):
+        if prev_symbol:
+            return self.symbol(
+                prev_symbol, *self.args, act_type=self.act_type, **self.kwargs)
+        return self.symbol(*self.args, **self.kwargs)
+
+
+class PReLU(LeakyReLU):
+    @property
+    def act_type(self):
+        return 'prelu'
 
 
 class Dense(MXNetSymbol):
@@ -124,6 +170,12 @@ class Sequential(object):
         """ for mxnet this is not necessary, but we have it here for
             convenience.
         """
+        try:
+            self.loss = LOSS_MAP[loss]
+        except KeyError:
+            self.logger.debug('Loss function not found.')
+            self.loss = 'acc'
+
         self.optimizer = optimizer
 
     def visualize(self):
@@ -132,14 +184,14 @@ class Sequential(object):
     def add(self, symbol):
             self.prev_symbol = symbol(self.prev_symbol)
 
-    def fit(self, X, y, nb_epoch=10, learning_rate=0.01, batch_size=128):
+    def fit(self, X, y, nb_epoch=10, learning_rate=0.01, batch_size=128, validation_split=0.15):
         self.model = mx.model.FeedForward(self.prev_symbol,
                                           num_epoch=nb_epoch,
                                           optimizer=self.optimizer,
                                           numpy_batch_size=batch_size,
                                           learning_rate=learning_rate)
 
-        self.model.fit(X, y)
+        self.model.fit(X, y, eval_metric=self.loss)
 
     def predict(self, X):
         return self.model.predict(X)
